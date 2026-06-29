@@ -38,6 +38,10 @@ class Outage:
     message: str
     type_id: int
     is_active: bool
+    # Dodatkowe pola do filtrowania po lokalizacji
+    city_name: str = ""
+    street: str = ""
+    raw_location: str = ""
 
 
 class TauronOutageFetcher:
@@ -94,16 +98,36 @@ class TauronOutageFetcher:
         outages: list[Outage] = []
         for item in data.get("OutageItems") or []:
             try:
+                # Zbieramy informacje o lokalizacji z różnych możliwych pól
+                city = str(
+                    item.get("CityName")
+                    or item.get("City")
+                    or item.get("Locality")
+                    or ""
+                )
+                street = str(item.get("Street") or item.get("Address") or "")
+                raw_parts = []
+                for k, v in item.items():
+                    if isinstance(v, str) and any(
+                        x in k.lower()
+                        for x in ["city", "street", "address", "locality", "place"]
+                    ):
+                        raw_parts.append(v)
+                raw_location = " ".join(raw_parts)
+
                 outages.append(
                     Outage(
-                        outage_id=item["OutageId"],
+                        outage_id=str(item["OutageId"]),
                         start_date=datetime.fromisoformat(item["StartDate"]),
                         end_date=datetime.fromisoformat(item["EndDate"]),
                         message=item.get("Message", ""),
                         type_id=item.get("TypeId", 0),
                         is_active=item.get("IsActive", True),
+                        city_name=city,
+                        street=street,
+                        raw_location=raw_location,
                     ),
                 )
-            except (KeyError, ValueError) as err:
+            except (KeyError, ValueError, TypeError) as err:
                 _LOGGER.debug("Skip malformed outage item: %s", err)
         return outages
