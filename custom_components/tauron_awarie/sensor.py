@@ -46,13 +46,11 @@ SCAN_INTERVAL = timedelta(hours=12)
 
 
 async def async_setup_entry(
-    hass: HomeAssistant,  # noqa: ARG001
+    hass: HomeAssistant,
     config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the Tauron Awarie sensor from a config entry."""
-    # Create session with threaded resolver to avoid DNS issues
-    # Each config entry gets its own session to avoid sharing issues
     connector = aiohttp.TCPConnector(
         resolver=ThreadedResolver(),
         limit=10,
@@ -60,7 +58,6 @@ async def async_setup_entry(
     )
     session = aiohttp.ClientSession(connector=connector)
 
-    # Store session reference for cleanup
     config_entry.runtime_data = {"session": session}
 
     async_add_entities(
@@ -80,7 +77,7 @@ class TauronAwarieSensor(SensorEntity):
         entry: ConfigEntry,
     ) -> None:
         """Initialize the sensor."""
-        self._session = session  # Store session for cleanup
+        self._session = session
         data = entry.data
         self._params = OutageParams(
             province_gaid=data[CONF_PROVINCE_GAID],
@@ -105,8 +102,7 @@ class TauronAwarieSensor(SensorEntity):
         if self._params.city_area_id:
             uid_parts.append(str(self._params.city_area_id))
         self._attr_unique_id = "tauron_awarie_" + "_".join(uid_parts).lower().replace(
-            " ",
-            "_",
+            " ", "_"
         )
 
         self._district_name = district
@@ -131,8 +127,7 @@ class TauronAwarieSensor(SensorEntity):
     def device_info(self) -> dict[str, Any]:
         """Group entities under a device."""
         identifier = f"{self._params.district_gaid}_{self._city_name}".lower().replace(
-            " ",
-            "_",
+            " ", "_"
         )
         return {
             "identifiers": {(DOMAIN, identifier)},
@@ -141,25 +136,49 @@ class TauronAwarieSensor(SensorEntity):
             "model": "Awarie",
         }
 
-    # ------------------------------------------------------------------
-    # Update
-    # ------------------------------------------------------------------
+    def _filter_outages(self, outages: list[Outage]) -> list[Outage]:
+        """Filter outages to only those matching the configured city name."""
+        if not self._city_name:
+            return outages
+
+        city_lower = self._city_name.lower().strip()
+        filtered = []
+        for o in outages:
+            text = f"{o.message} {o.city_name} {o.street} {o.raw_location}".lower()
+            if city_lower in text or city_lower in o.message.lower():
+                filtered.append(o)
+            else:
+                _LOGGER.debug(
+                    "Filtered out outage %s for city '%s' (location: %s)",
+                    o.outage_id[:8],
+                    self._city_name,
+                    o.message[:80],
+                )
+        _LOGGER.info(
+            "Filtered outages: %d total → %d matching city '%s'",
+            len(outages),
+            len(filtered),
+            self._city_name,
+        )
+        return filtered
 
     async def async_update(self) -> None:
         """Fetch fresh outage data from the WAAPI."""
         try:
             _LOGGER.debug(
-                "Fetching outages: province=%s district=%s commune=%s area=%s",
+                "Fetching outages: province=%s district=%s commune=%s area=%s city=%s",
                 self._params.province_gaid,
                 self._params.district_gaid,
                 self._params.commune_gaid,
                 self._params.city_area_id,
+                self._city_name,
             )
             outages = await self._fetcher.fetch_outages(self._params)
-            self._outages = outages
+            filtered_outages = self._filter_outages(outages)
+            self._outages = filtered_outages
 
             now = datetime.now(UTC)
-            active = [o for o in outages if o.end_date > now]
+            active = [o for o in filtered_outages if o.end_date > now]
             next_outage = min(active, key=lambda o: o.start_date) if active else None
 
             self._attr_native_value = None
@@ -179,10 +198,6 @@ class TauronAwarieSensor(SensorEntity):
         except Exception:
             _LOGGER.exception("Error during outage update")
             self._attr_native_value = None
-
-    # ------------------------------------------------------------------
-    # Attributes
-    # ------------------------------------------------------------------
 
     def _base_attrs(
         self,
@@ -204,6 +219,7 @@ class TauronAwarieSensor(SensorEntity):
                     "end": o.end_date.isoformat(),
                     "message": o.message,
                     "type": OUTAGE_TYPE.get(o.type_id, str(o.type_id)),
+                    "city": o.city_name,
                 }
                 for o in active
             ],
@@ -219,10 +235,7 @@ class TauronAwarieSensor(SensorEntity):
             )
         return attrs
 
-    # ------------------------------------------------------------------
-    # Calendar sync
-    # ------------------------------------------------------------------
-
+    # _sync_calendar i pozostałe metody bez zmian (używają już przefiltrowanych active)
     async def _sync_calendar(self, outages: list[Outage]) -> None:
         """Create timed calendar events for outages (idempotent)."""
         if not self.hass:
@@ -267,7 +280,7 @@ class TauronAwarieSensor(SensorEntity):
 
     async def async_will_remove_from_hass(self) -> None:
         """Entity is being removed from Home Assistant."""
-        # Session cleanup is handled at the config entry level
+        pass
 
     async def _calendar_event_exists(
         self,
